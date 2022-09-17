@@ -1,6 +1,7 @@
 mod binary_op;
 mod exists;
 mod is_null;
+mod like;
 mod nested;
 mod unary_op;
 
@@ -10,9 +11,8 @@ pub mod cast;
 pub mod extract;
 pub mod function;
 pub mod in_list;
-pub mod in_subquery;
 
-pub use exists::exists;
+pub use exists::{exists, not_exists};
 pub use nested::nested;
 
 use {
@@ -23,13 +23,15 @@ use {
             UnaryOperator,
         },
         ast_builder::QueryNode,
-        parse_sql::parse_expr,
+        parse_sql::{parse_comma_separated_exprs, parse_expr, parse_query},
+        prelude::DataType,
         result::{Error, Result},
-        translate::translate_expr,
+        translate::{translate_expr, translate_query},
     },
     aggregate::AggregateNode,
     bigdecimal::BigDecimal,
     function::FunctionNode,
+    in_list::InListNode,
 };
 
 #[derive(Clone)]
@@ -46,6 +48,16 @@ pub enum ExprNode {
         negated: bool,
         low: Box<ExprNode>,
         high: Box<ExprNode>,
+    },
+    Like {
+        expr: Box<ExprNode>,
+        negated: bool,
+        pattern: Box<ExprNode>,
+    },
+    ILike {
+        expr: Box<ExprNode>,
+        negated: bool,
+        pattern: Box<ExprNode>,
     },
     BinaryOp {
         left: Box<ExprNode>,
@@ -64,12 +76,7 @@ pub enum ExprNode {
     IsNotNull(Box<ExprNode>),
     InList {
         expr: Box<ExprNode>,
-        list: Vec<ExprNode>,
-        negated: bool,
-    },
-    InSubquery {
-        expr: Box<ExprNode>,
-        subquery: Box<QueryNode>,
+        list: Box<InListNode>,
         negated: bool,
     },
     Nested(Box<ExprNode>),
@@ -79,7 +86,10 @@ pub enum ExprNode {
         expr: Box<ExprNode>,
         data_type: DataTypeNode,
     },
-    Exists(Box<QueryNode>),
+    Exists {
+        subquery: Box<QueryNode>,
+        negated: bool,
+    },
 }
 
 impl TryFrom<ExprNode> for Expr {
@@ -114,6 +124,34 @@ impl TryFrom<ExprNode> for Expr {
                     high,
                 })
             }
+            ExprNode::Like {
+                expr,
+                negated,
+                pattern,
+            } => {
+                let expr = Expr::try_from(*expr).map(Box::new)?;
+                let pattern = Expr::try_from(*pattern).map(Box::new)?;
+
+                Ok(Expr::Like {
+                    expr,
+                    negated,
+                    pattern,
+                })
+            }
+            ExprNode::ILike {
+                expr,
+                negated,
+                pattern,
+            } => {
+                let expr = Expr::try_from(*expr).map(Box::new)?;
+                let pattern = Expr::try_from(*pattern).map(Box::new)?;
+
+                Ok(Expr::ILike {
+                    expr,
+                    negated,
+                    pattern,
+                })
+            }
             ExprNode::BinaryOp { left, op, right } => {
                 let left = Expr::try_from(*left).map(Box::new)?;
                 let right = Expr::try_from(*right).map(Box::new)?;
@@ -141,30 +179,51 @@ impl TryFrom<ExprNode> for Expr {
                 negated,
             } => {
                 let expr = Expr::try_from(*expr).map(Box::new)?;
-                let list = list
-                    .into_iter()
-                    .map(Expr::try_from)
-                    .collect::<Result<Vec<_>>>()?;
 
-                Ok(Expr::InList {
-                    expr,
-                    list,
-                    negated,
-                })
-            }
-            ExprNode::InSubquery {
-                expr,
-                subquery,
-                negated,
-            } => {
-                let expr = Expr::try_from(*expr).map(Box::new)?;
-                let subquery = Query::try_from(*subquery).map(Box::new)?;
+                match *list {
+                    InListNode::InList(list) => {
+                        let list = list
+                            .into_iter()
+                            .map(Expr::try_from)
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok(Expr::InList {
+                            expr,
+                            list,
+                            negated,
+                        })
+                    }
+                    InListNode::Query(subquery) => {
+                        let subquery = Query::try_from(*subquery).map(Box::new)?;
+                        Ok(Expr::InSubquery {
+                            expr,
+                            subquery,
+                            negated,
+                        })
+                    }
+                    InListNode::Text(value) => {
+                        let subquery = parse_query(value.clone())
+                            .and_then(|item| translate_query(&item))
+                            .map(Box::new);
 
-                Ok(Expr::InSubquery {
-                    expr,
-                    subquery,
-                    negated,
-                })
+                        if let Ok(subquery) = subquery {
+                            return Ok(Expr::InSubquery {
+                                expr,
+                                subquery,
+                                negated,
+                            });
+                        }
+
+                        parse_comma_separated_exprs(&*value)?
+                            .iter()
+                            .map(translate_expr)
+                            .collect::<Result<Vec<_>>>()
+                            .map(|list| Expr::InList {
+                                expr,
+                                list,
+                                negated,
+                            })
+                    }
+                }
             }
             ExprNode::Nested(expr) => Expr::try_from(*expr).map(Box::new).map(Expr::Nested),
             ExprNode::Function(func_expr) => Function::try_from(*func_expr)
@@ -173,10 +232,9 @@ impl TryFrom<ExprNode> for Expr {
             ExprNode::Aggregate(aggr_expr) => Aggregate::try_from(*aggr_expr)
                 .map(Box::new)
                 .map(Expr::Aggregate),
-            ExprNode::Exists(query) => {
-                let query = Query::try_from(*query).map(Box::new)?;
-                Ok(Expr::Exists(query))
-            }
+            ExprNode::Exists { subquery, negated } => Query::try_from(*subquery)
+                .map(Box::new)
+                .map(|subquery| Expr::Exists { subquery, negated }),
         }
     }
 }
@@ -221,4 +279,18 @@ pub fn num(value: i64) -> ExprNode {
 
 pub fn text(value: &str) -> ExprNode {
     ExprNode::Expr(Expr::Literal(AstLiteral::QuotedString(value.to_owned())))
+}
+
+pub fn date(date: &str) -> ExprNode {
+    ExprNode::Expr(Expr::TypedString {
+        data_type: (DataType::Date),
+        value: (date.to_string()),
+    })
+}
+
+pub fn timestamp(timestamp: &str) -> ExprNode {
+    ExprNode::Expr(Expr::TypedString {
+        data_type: (DataType::Timestamp),
+        value: (timestamp.to_string()),
+    })
 }

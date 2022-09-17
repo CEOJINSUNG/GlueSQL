@@ -4,16 +4,18 @@ mod limit;
 mod limit_offset;
 mod offset;
 mod offset_limit;
+mod order_by;
 mod project;
 mod root;
 
 pub use {
     group_by::GroupByNode, having::HavingNode, limit::LimitNode, limit_offset::LimitOffsetNode,
-    offset::OffsetNode, offset_limit::OffsetLimitNode, project::ProjectNode, root::SelectNode,
+    offset::OffsetNode, offset_limit::OffsetLimitNode, order_by::OrderByNode, project::ProjectNode,
+    root::SelectNode,
 };
 
 use crate::{
-    ast::{Expr, Query, Select, SelectItem, SetExpr, Statement, TableWithJoins},
+    ast::{Expr, OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableWithJoins},
     result::Result,
 };
 
@@ -29,6 +31,7 @@ pub struct NodeData {
     pub selection: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub having: Option<Expr>,
+    pub order_by: Vec<OrderByExpr>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
 }
@@ -41,6 +44,7 @@ impl NodeData {
             selection,
             group_by,
             having,
+            order_by,
             offset,
             limit,
         } = self;
@@ -51,11 +55,11 @@ impl NodeData {
             selection,
             group_by,
             having,
-            order_by: vec![],
         };
 
         Query {
             body: SetExpr::Select(Box::new(select)),
+            order_by,
             offset,
             limit,
         }
