@@ -1,28 +1,32 @@
 use {
     super::{NodeData, Prebuild},
     crate::{
-        ast::Statement,
         ast_builder::{
-            GroupByNode, HavingNode, LimitNode, LimitOffsetNode, OffsetLimitNode, OffsetNode,
-            OrderByNode, SelectItemList, SelectNode,
+            FilterNode, GroupByNode, HashJoinNode, HavingNode, JoinConstraintNode, JoinNode,
+            LimitNode, LimitOffsetNode, OffsetLimitNode, OffsetNode, OrderByNode, SelectItemList,
+            SelectNode,
         },
         result::Result,
     },
 };
 
 #[derive(Clone)]
-pub enum PrevNode {
+pub enum PrevNode<'a> {
     Select(SelectNode),
-    GroupBy(GroupByNode),
-    Having(HavingNode),
-    Limit(LimitNode),
-    LimitOffset(LimitOffsetNode),
-    Offset(OffsetNode),
-    OffsetLimit(OffsetLimitNode),
-    OrderBy(OrderByNode),
+    GroupBy(GroupByNode<'a>),
+    Having(HavingNode<'a>),
+    Limit(LimitNode<'a>),
+    LimitOffset(LimitOffsetNode<'a>),
+    Offset(OffsetNode<'a>),
+    OffsetLimit(OffsetLimitNode<'a>),
+    Join(Box<JoinNode<'a>>),
+    JoinConstraint(Box<JoinConstraintNode<'a>>),
+    HashJoin(HashJoinNode<'a>),
+    Filter(FilterNode<'a>),
+    OrderBy(OrderByNode<'a>),
 }
 
-impl Prebuild for PrevNode {
+impl<'a> Prebuild for PrevNode<'a> {
     fn prebuild(self) -> Result<NodeData> {
         match self {
             Self::Select(node) => node.prebuild(),
@@ -32,85 +36,112 @@ impl Prebuild for PrevNode {
             Self::LimitOffset(node) => node.prebuild(),
             Self::Offset(node) => node.prebuild(),
             Self::OffsetLimit(node) => node.prebuild(),
+            Self::Join(node) => node.prebuild(),
+            Self::JoinConstraint(node) => node.prebuild(),
+            Self::HashJoin(node) => node.prebuild(),
+            Self::Filter(node) => node.prebuild(),
             Self::OrderBy(node) => node.prebuild(),
         }
     }
 }
 
-impl From<SelectNode> for PrevNode {
+impl<'a> From<SelectNode> for PrevNode<'a> {
     fn from(node: SelectNode) -> Self {
         PrevNode::Select(node)
     }
 }
 
-impl From<GroupByNode> for PrevNode {
-    fn from(node: GroupByNode) -> Self {
+impl<'a> From<GroupByNode<'a>> for PrevNode<'a> {
+    fn from(node: GroupByNode<'a>) -> Self {
         PrevNode::GroupBy(node)
     }
 }
 
-impl From<HavingNode> for PrevNode {
-    fn from(node: HavingNode) -> Self {
+impl<'a> From<HavingNode<'a>> for PrevNode<'a> {
+    fn from(node: HavingNode<'a>) -> Self {
         PrevNode::Having(node)
     }
 }
 
-impl From<LimitNode> for PrevNode {
-    fn from(node: LimitNode) -> Self {
+impl<'a> From<LimitNode<'a>> for PrevNode<'a> {
+    fn from(node: LimitNode<'a>) -> Self {
         PrevNode::Limit(node)
     }
 }
 
-impl From<LimitOffsetNode> for PrevNode {
-    fn from(node: LimitOffsetNode) -> Self {
+impl<'a> From<LimitOffsetNode<'a>> for PrevNode<'a> {
+    fn from(node: LimitOffsetNode<'a>) -> Self {
         PrevNode::LimitOffset(node)
     }
 }
 
-impl From<OffsetNode> for PrevNode {
-    fn from(node: OffsetNode) -> Self {
+impl<'a> From<OffsetNode<'a>> for PrevNode<'a> {
+    fn from(node: OffsetNode<'a>) -> Self {
         PrevNode::Offset(node)
     }
 }
 
-impl From<OffsetLimitNode> for PrevNode {
-    fn from(node: OffsetLimitNode) -> Self {
+impl<'a> From<OffsetLimitNode<'a>> for PrevNode<'a> {
+    fn from(node: OffsetLimitNode<'a>) -> Self {
         PrevNode::OffsetLimit(node)
     }
 }
 
-impl From<OrderByNode> for PrevNode {
-    fn from(node: OrderByNode) -> Self {
+impl<'a> From<JoinNode<'a>> for PrevNode<'a> {
+    fn from(node: JoinNode<'a>) -> Self {
+        PrevNode::Join(Box::new(node))
+    }
+}
+
+impl<'a> From<JoinConstraintNode<'a>> for PrevNode<'a> {
+    fn from(node: JoinConstraintNode<'a>) -> Self {
+        PrevNode::JoinConstraint(Box::new(node))
+    }
+}
+
+impl<'a> From<HashJoinNode<'a>> for PrevNode<'a> {
+    fn from(node: HashJoinNode<'a>) -> Self {
+        PrevNode::HashJoin(node)
+    }
+}
+
+impl<'a> From<FilterNode<'a>> for PrevNode<'a> {
+    fn from(node: FilterNode<'a>) -> Self {
+        PrevNode::Filter(node)
+    }
+}
+
+impl<'a> From<OrderByNode<'a>> for PrevNode<'a> {
+    fn from(node: OrderByNode<'a>) -> Self {
         PrevNode::OrderBy(node)
     }
 }
 
 #[derive(Clone)]
-pub struct ProjectNode {
-    prev_node: PrevNode,
-    select_items_list: Vec<SelectItemList>,
+pub struct ProjectNode<'a> {
+    prev_node: PrevNode<'a>,
+    select_items_list: Vec<SelectItemList<'a>>,
 }
 
-impl ProjectNode {
-    pub fn new<N: Into<PrevNode>, T: Into<SelectItemList>>(prev_node: N, select_items: T) -> Self {
+impl<'a> ProjectNode<'a> {
+    pub fn new<N: Into<PrevNode<'a>>, T: Into<SelectItemList<'a>>>(
+        prev_node: N,
+        select_items: T,
+    ) -> Self {
         Self {
             prev_node: prev_node.into(),
             select_items_list: vec![select_items.into()],
         }
     }
 
-    pub fn project<T: Into<SelectItemList>>(mut self, select_items: T) -> Self {
+    pub fn project<T: Into<SelectItemList<'a>>>(mut self, select_items: T) -> Self {
         self.select_items_list.push(select_items.into());
 
         self
     }
-
-    pub fn build(self) -> Result<Statement> {
-        self.prebuild().map(NodeData::build_stmt)
-    }
 }
 
-impl Prebuild for ProjectNode {
+impl<'a> Prebuild for ProjectNode<'a> {
     fn prebuild(self) -> Result<NodeData> {
         let mut select_data = self.prev_node.prebuild()?;
         select_data.projection = self
@@ -128,18 +159,27 @@ impl Prebuild for ProjectNode {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast_builder::{col, table, test};
+    use crate::{
+        ast::{
+            Join, JoinConstraint, JoinExecutor, JoinOperator, Query, Select, SetExpr, Statement,
+            TableFactor, TableWithJoins,
+        },
+        ast_builder::{col, table, test, Build, SelectItemList},
+    };
 
     #[test]
     fn project() {
+        // select node -> project node -> build
         let actual = table("Good").select().project("id").build();
         let expected = "SELECT id FROM Good";
         test(actual, expected);
 
+        // select node -> project node -> build
         let actual = table("Group").select().project("*, Group.*, name").build();
         let expected = "SELECT *, Group.*, name FROM Group";
         test(actual, expected);
 
+        // project node -> project node -> build
         let actual = table("Foo")
             .select()
             .project(vec!["col1", "col2"])
@@ -158,6 +198,7 @@ mod tests {
         ";
         test(actual, expected);
 
+        // select node -> project node -> build
         let actual = table("Aliased")
             .select()
             .project("1 + 1 as col1, col2")
@@ -168,12 +209,12 @@ mod tests {
 
     #[test]
     fn prev_nodes() {
-        // Select
+        // select node -> project node -> build
         let actual = table("Foo").select().project("*").build();
         let expected = "SELECT * FROM Foo";
         test(actual, expected);
 
-        // GroupBy
+        // group by node -> project node -> build
         let actual = table("Bar")
             .select()
             .group_by("city")
@@ -187,7 +228,7 @@ mod tests {
         ";
         test(actual, expected);
 
-        // Having
+        // having node -> project node -> build
         let actual = table("Cat")
             .select()
             .filter(r#"type = "cute""#)
@@ -205,12 +246,12 @@ mod tests {
         "#;
         test(actual, expected);
 
-        // Limit
+        // limit node -> project node -> build
         let actual = table("Item").select().limit(10).project("*").build();
         let expected = "SELECT * FROM Item LIMIT 10";
         test(actual, expected);
 
-        // LimitOffset
+        // limit offset node -> project node -> build
         let actual = table("Operator")
             .select()
             .limit(100)
@@ -220,12 +261,12 @@ mod tests {
         let expected = "SELECT name FROM Operator LIMIT 100 OFFSET 50";
         test(actual, expected);
 
-        // Offset
+        // offset node -> project node -> build
         let actual = table("Item").select().offset(10).project("*").build();
         let expected = "SELECT * FROM Item OFFSET 10";
         test(actual, expected);
 
-        // OffsetLimit
+        // offset limit node -> project node -> build
         let actual = table("Operator")
             .select()
             .offset(3)
@@ -234,5 +275,61 @@ mod tests {
             .build();
         let expected = "SELECT name FROM Operator LIMIT 10 OFFSET 3";
         test(actual, expected);
+
+        // order by node -> project node -> build
+        let actual = table("Foo")
+            .select()
+            .order_by("id asc")
+            .project("id")
+            .build();
+        let expected = "SELECT id FROM Foo ORDER BY id asc";
+        test(actual, expected);
+
+        // hash join node -> project node -> build
+        let actual = table("Player")
+            .select()
+            .join("PlayerItem")
+            .hash_executor("PlayerItem.user_id", "Player.id")
+            .project("Player.name, PlayerItem.name")
+            .build();
+        let expected = {
+            let join = Join {
+                relation: TableFactor::Table {
+                    name: "PlayerItem".to_owned(),
+                    alias: None,
+                    index: None,
+                },
+                join_operator: JoinOperator::Inner(JoinConstraint::None),
+                join_executor: JoinExecutor::Hash {
+                    key_expr: col("PlayerItem.user_id").try_into().unwrap(),
+                    value_expr: col("Player.id").try_into().unwrap(),
+                    where_clause: None,
+                },
+            };
+            let select = Select {
+                projection: SelectItemList::from("Player.name, PlayerItem.name")
+                    .try_into()
+                    .unwrap(),
+                from: TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: "Player".to_owned(),
+                        alias: None,
+                        index: None,
+                    },
+                    joins: vec![join],
+                },
+                selection: None,
+                group_by: Vec::new(),
+                having: None,
+            };
+
+            Ok(Statement::Query(Query {
+                body: SetExpr::Select(Box::new(select)),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            }))
+        };
+        assert_eq!(actual, expected);
     }
 }

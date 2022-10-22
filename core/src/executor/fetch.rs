@@ -2,10 +2,10 @@ use {
     super::{context::FilterContext, evaluate_stateless, filter::check_expr},
     crate::{
         ast::{
-            ColumnDef, Expr, IndexItem, Join, Query, Select, SetExpr, TableAlias, TableFactor,
-            TableWithJoins, Values,
+            ColumnDef, ColumnOption, Dictionary, Expr, IndexItem, Join, Query, Select, SetExpr,
+            TableAlias, TableFactor, TableWithJoins, ToSql, Values,
         },
-        data::{get_alias, get_index, get_name, Key, Row, Value},
+        data::{get_alias, get_index, Key, Row, Value},
         executor::{
             evaluate::evaluate,
             select::{get_labels, select},
@@ -53,7 +53,7 @@ pub async fn fetch<'a>(
                     Some(expr) => expr,
                 };
 
-                let context = FilterContext::new(table_name, Rc::clone(&columns), Some(&row), None);
+                let context = FilterContext::new(table_name, Rc::clone(&columns), &row, None);
 
                 check_expr(storage, Some(Rc::new(context)), None, expr)
                     .await
@@ -65,10 +65,11 @@ pub async fn fetch<'a>(
 }
 
 #[derive(futures_enum::Stream)]
-pub enum Rows<I1, I2, I3> {
+pub enum Rows<I1, I2, I3, I4> {
     Derived(I1),
     Table(I2),
     Series(I3),
+    Dictionary(I4),
 }
 
 pub async fn fetch_relation_rows<'a>(
@@ -84,7 +85,6 @@ pub async fn fetch_relation_rows<'a>(
             Ok(Rows::Derived(rows))
         }
         TableFactor::Table { name, .. } => {
-            let table_name = get_name(name)?;
             let rows = {
                 #[cfg(feature = "index")]
                 #[derive(Iterator)]
@@ -117,7 +117,7 @@ pub async fn fetch_relation_rows<'a>(
                         };
 
                         let rows = storage
-                            .scan_indexed_data(table_name, index_name, *asc, cmp_value)
+                            .scan_indexed_data(name, index_name, *asc, cmp_value)
                             .await?
                             .map_ok(|(_, row)| row);
 
@@ -131,7 +131,7 @@ pub async fn fetch_relation_rows<'a>(
                             .and_then(Key::try_from)?;
 
                         let rows = storage
-                            .fetch_data(table_name, &key)
+                            .fetch_data(name, &key)
                             .await
                             .transpose()
                             .map(|row| vec![row])
@@ -140,7 +140,7 @@ pub async fn fetch_relation_rows<'a>(
                         Rows::PrimaryKey(rows.into_iter())
                     }
                     _ => {
-                        let rows = storage.scan_data(table_name).await?.map_ok(|(_, row)| row);
+                        let rows = storage.scan_data(name).await?.map_ok(|(_, row)| row);
 
                         Rows::FullScan(rows)
                     }
@@ -160,6 +160,86 @@ pub async fn fetch_relation_rows<'a>(
 
             Ok(Rows::Series(stream::iter(rows)))
         }
+        TableFactor::Dictionary { dict, .. } => {
+            let rows = {
+                #[derive(Iterator)]
+                enum Rows<I1, I2, I3> {
+                    Tables(I1),
+                    TableColumns(I2),
+                    Indexes(I3),
+                }
+                match dict {
+                    Dictionary::GlueTables => {
+                        let schemas = storage.fetch_all_schemas().await?;
+                        let rows = schemas
+                            .into_iter()
+                            .map(|schema| Ok(Row(vec![Value::Str(schema.table_name)])));
+
+                        Rows::Tables(rows)
+                    }
+                    Dictionary::GlueTableColumns => {
+                        let schemas = storage.fetch_all_schemas().await?;
+                        let rows = schemas.into_iter().flat_map(|schema| {
+                            let table_name = schema.table_name;
+                            schema.column_defs.into_iter().enumerate().map(
+                                move |(index, ColumnDef { name, .. })| -> Result<_> {
+                                    Ok(Row(vec![
+                                        Value::Str(table_name.clone()),
+                                        Value::Str(name),
+                                        Value::I64(index as i64 + 1),
+                                    ]))
+                                },
+                            )
+                        });
+
+                        Rows::TableColumns(rows)
+                    }
+                    Dictionary::GlueIndexes => {
+                        let schemas = storage.fetch_all_schemas().await?;
+                        let rows = schemas.into_iter().flat_map(|schema| {
+                            let primary_column = schema.column_defs.iter().find_map(
+                                |ColumnDef { name, options, .. }| {
+                                    options
+                                        .iter()
+                                        .any(|column_option_def| {
+                                            column_option_def.option
+                                                == ColumnOption::Unique { is_primary: true }
+                                        })
+                                        .then_some(name)
+                                },
+                            );
+
+                            let clustered = match primary_column {
+                                Some(column_name) => vec![Ok(Row(vec![
+                                    Value::Str(schema.table_name.clone()),
+                                    Value::Str("PRIMARY".to_owned()),
+                                    Value::Str("BOTH".to_owned()),
+                                    Value::Str(column_name.to_owned()),
+                                    Value::Bool(true),
+                                ]))],
+                                None => Vec::new(),
+                            };
+
+                            let non_clustered = schema.indexes.into_iter().map(move |index| {
+                                Ok(Row(vec![
+                                    Value::Str(schema.table_name.clone()),
+                                    Value::Str(index.name),
+                                    Value::Str(index.order.to_string()),
+                                    Value::Str(index.expr.to_sql()),
+                                    Value::Bool(false),
+                                ]))
+                            });
+
+                            clustered.into_iter().chain(non_clustered)
+                        });
+
+                        Rows::Indexes(rows)
+                    }
+                }
+            };
+
+            Ok(Rows::Dictionary(stream::iter(rows)))
+        }
     }
 }
 
@@ -167,7 +247,7 @@ pub async fn fetch_columns(storage: &dyn GStore, table_name: &str) -> Result<Vec
     Ok(storage
         .fetch_schema(table_name)
         .await?
-        .ok_or_else(|| FetchError::TableNotFound(table_name.to_string()))?
+        .ok_or_else(|| FetchError::TableNotFound(table_name.to_owned()))?
         .column_defs
         .into_iter()
         .map(|ColumnDef { name, .. }| name)
@@ -180,12 +260,23 @@ pub async fn fetch_relation_columns(
     table_factor: &TableFactor,
 ) -> Result<Vec<String>> {
     match table_factor {
-        TableFactor::Table { name, .. } => {
-            let table_name = get_name(name)?;
-
-            fetch_columns(storage, table_name).await
-        }
-        TableFactor::Series { .. } => Ok(vec!["N".to_string()]),
+        TableFactor::Table { name, .. } => fetch_columns(storage, name).await,
+        TableFactor::Series { .. } => Ok(vec!["N".to_owned()]),
+        TableFactor::Dictionary { dict, .. } => match dict {
+            Dictionary::GlueTables => Ok(vec!["TABLE_NAME".to_owned()]),
+            Dictionary::GlueTableColumns => Ok(vec![
+                "TABLE_NAME".to_owned(),
+                "COLUMN_NAME".to_owned(),
+                "COLUMN_ID".to_owned(),
+            ]),
+            Dictionary::GlueIndexes => Ok(vec![
+                "TABLE_NAME".to_owned(),
+                "INDEX_NAME".to_owned(),
+                "ORDER".to_owned(),
+                "EXPRESSION".to_owned(),
+                "UNIQUENESS".to_owned(),
+            ]),
+        },
         TableFactor::Derived {
             subquery: Query { body, .. },
             alias: TableAlias { columns, name },
@@ -204,7 +295,7 @@ pub async fn fetch_relation_columns(
                 let join_columns = fetch_join_columns(joins, storage).await?;
                 let labels = get_labels(
                     projection,
-                    get_alias(relation)?,
+                    get_alias(relation),
                     &columns,
                     Some(&join_columns),
                 )?;
@@ -232,6 +323,7 @@ pub async fn fetch_relation_columns(
         },
     }
 }
+
 pub async fn fetch_join_columns<'a>(
     joins: &'a [Join],
     storage: &dyn GStore,
@@ -240,7 +332,7 @@ pub async fn fetch_join_columns<'a>(
         .map(Ok::<_, Error>)
         .and_then(|join| async move {
             let relation = &join.relation;
-            let alias = get_alias(relation)?;
+            let alias = get_alias(relation);
             let columns = fetch_relation_columns(storage, relation).await?;
             Ok((alias, columns))
         })

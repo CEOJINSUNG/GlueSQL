@@ -1,6 +1,8 @@
 pub mod abs;
+pub mod ascii;
 pub mod cast;
 pub mod ceil;
+pub mod chr;
 pub mod concat;
 pub mod degrees;
 pub mod div_mod;
@@ -17,6 +19,7 @@ pub mod ltrim_rtrim;
 pub mod math_function;
 pub mod now;
 pub mod pi;
+pub mod position;
 pub mod radians;
 pub mod repeat;
 pub mod reverse;

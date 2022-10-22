@@ -1,82 +1,113 @@
 use {
     super::{NodeData, Prebuild},
     crate::{
-        ast::Statement,
         ast_builder::{
-            ExprNode, GroupByNode, HavingNode, LimitNode, OffsetNode, OrderByExprList, ProjectNode,
-            SelectItemList, SelectNode,
+            ExprNode, FilterNode, GroupByNode, HashJoinNode, HavingNode, JoinConstraintNode,
+            JoinNode, LimitNode, OffsetNode, OrderByExprList, ProjectNode, SelectItemList,
+            SelectNode,
         },
         result::Result,
     },
 };
 
 #[derive(Clone)]
-pub enum PrevNode {
+pub enum PrevNode<'a> {
     Select(SelectNode),
-    Having(HavingNode),
-    GroupBy(GroupByNode),
+    Having(HavingNode<'a>),
+    GroupBy(GroupByNode<'a>),
+    Filter(FilterNode<'a>),
+    JoinNode(JoinNode<'a>),
+    JoinConstraint(JoinConstraintNode<'a>),
+    HashJoin(Box<HashJoinNode<'a>>),
 }
 
-impl Prebuild for PrevNode {
+impl<'a> Prebuild for PrevNode<'a> {
     fn prebuild(self) -> Result<NodeData> {
         match self {
             Self::Select(node) => node.prebuild(),
             Self::Having(node) => node.prebuild(),
             Self::GroupBy(node) => node.prebuild(),
+            Self::Filter(node) => node.prebuild(),
+            Self::JoinNode(node) => node.prebuild(),
+            Self::JoinConstraint(node) => node.prebuild(),
+            Self::HashJoin(node) => node.prebuild(),
         }
     }
 }
 
-impl From<SelectNode> for PrevNode {
+impl<'a> From<SelectNode> for PrevNode<'a> {
     fn from(node: SelectNode) -> Self {
         PrevNode::Select(node)
     }
 }
 
-impl From<HavingNode> for PrevNode {
-    fn from(node: HavingNode) -> Self {
+impl<'a> From<HavingNode<'a>> for PrevNode<'a> {
+    fn from(node: HavingNode<'a>) -> Self {
         PrevNode::Having(node)
     }
 }
 
-impl From<GroupByNode> for PrevNode {
-    fn from(node: GroupByNode) -> Self {
+impl<'a> From<GroupByNode<'a>> for PrevNode<'a> {
+    fn from(node: GroupByNode<'a>) -> Self {
         PrevNode::GroupBy(node)
     }
 }
 
-#[derive(Clone)]
-pub struct OrderByNode {
-    prev_node: PrevNode,
-    expr_list: OrderByExprList,
+impl<'a> From<FilterNode<'a>> for PrevNode<'a> {
+    fn from(node: FilterNode<'a>) -> Self {
+        PrevNode::Filter(node)
+    }
 }
 
-impl OrderByNode {
-    pub fn new<N: Into<PrevNode>, T: Into<OrderByExprList>>(prev_node: N, expr_list: T) -> Self {
+impl<'a> From<JoinNode<'a>> for PrevNode<'a> {
+    fn from(node: JoinNode<'a>) -> Self {
+        PrevNode::JoinNode(node)
+    }
+}
+
+impl<'a> From<JoinConstraintNode<'a>> for PrevNode<'a> {
+    fn from(node: JoinConstraintNode<'a>) -> Self {
+        PrevNode::JoinConstraint(node)
+    }
+}
+
+impl<'a> From<HashJoinNode<'a>> for PrevNode<'a> {
+    fn from(node: HashJoinNode<'a>) -> Self {
+        PrevNode::HashJoin(Box::new(node))
+    }
+}
+
+#[derive(Clone)]
+pub struct OrderByNode<'a> {
+    prev_node: PrevNode<'a>,
+    expr_list: OrderByExprList<'a>,
+}
+
+impl<'a> OrderByNode<'a> {
+    pub fn new<N: Into<PrevNode<'a>>, T: Into<OrderByExprList<'a>>>(
+        prev_node: N,
+        expr_list: T,
+    ) -> Self {
         Self {
             prev_node: prev_node.into(),
             expr_list: expr_list.into(),
         }
     }
 
-    pub fn offset<T: Into<ExprNode>>(self, expr: T) -> OffsetNode {
+    pub fn offset<T: Into<ExprNode<'a>>>(self, expr: T) -> OffsetNode<'a> {
         OffsetNode::new(self, expr)
     }
 
-    pub fn limit<T: Into<ExprNode>>(self, expr: T) -> LimitNode {
+    pub fn limit<T: Into<ExprNode<'a>>>(self, expr: T) -> LimitNode<'a> {
         LimitNode::new(self, expr)
     }
 
-    pub fn project<T: Into<SelectItemList>>(self, select_items: T) -> ProjectNode {
+    pub fn project<T: Into<SelectItemList<'a>>>(self, select_items: T) -> ProjectNode<'a> {
         ProjectNode::new(self, select_items)
-    }
-
-    pub fn build(self) -> Result<Statement> {
-        self.prebuild().map(NodeData::build_stmt)
     }
 }
 
-impl Prebuild for OrderByNode {
+impl<'a> Prebuild for OrderByNode<'a> {
     fn prebuild(self) -> Result<NodeData> {
         let mut select_data = self.prev_node.prebuild()?;
         select_data.order_by = self.expr_list.try_into()?;
@@ -87,10 +118,17 @@ impl Prebuild for OrderByNode {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast_builder::{table, test, ExprNode};
+    use crate::{
+        ast::{
+            Join, JoinConstraint, JoinExecutor, JoinOperator, Query, Select, SetExpr, Statement,
+            TableFactor, TableWithJoins,
+        },
+        ast_builder::{col, table, test, Build, ExprNode, OrderByExprList, SelectItemList},
+    };
 
     #[test]
     fn order_by() {
+        // select node -> order by node(exprs vec) -> build
         let actual = table("Foo").select().order_by(vec!["name desc"]).build();
         let expected = "
             SELECT * FROM Foo
@@ -98,6 +136,33 @@ mod tests {
         ";
         test(actual, expected);
 
+        // select node -> order by node(exprs string) -> build
+        let actual = table("Bar")
+            .select()
+            .order_by("name asc, id desc, country")
+            .offset(10)
+            .build();
+        let expected = "
+                SELECT * FROM Bar 
+                ORDER BY name asc, id desc, country 
+                OFFSET 10
+            ";
+        test(actual, expected);
+
+        // group by node -> order by node -> build
+        let actual = table("Bar")
+            .select()
+            .group_by("name")
+            .order_by(vec!["id desc"])
+            .build();
+        let expected = "
+                SELECT * FROM Bar 
+                GROUP BY name 
+                ORDER BY id desc
+            ";
+        test(actual, expected);
+
+        // having node -> order by node -> build
         let actual = table("Foo")
             .select()
             .group_by("city")
@@ -116,29 +181,91 @@ mod tests {
         ";
         test(actual, expected);
 
-        let actual = table("Bar")
+        // filter node -> order by node -> build
+        let actaul = table("Foo")
             .select()
-            .order_by("name asc, id desc, country")
-            .offset(10)
+            .filter("id > 10")
+            .filter("id < 20")
+            .order_by("id asc")
             .build();
         let expected = "
-            SELECT * FROM Bar 
-            ORDER BY name asc, id desc, country 
-            OFFSET 10
+            SELECT * FROM Foo
+            WHERE id > 10 AND id < 20
+            ORDER BY id ASC";
+        test(actaul, expected);
+
+        // join node -> order by node -> build
+        let actual = table("Foo")
+            .select()
+            .join("Bar")
+            .order_by("Foo.id desc")
+            .build();
+        let expected = "
+            SELECT * FROM Foo
+            JOIN Bar
+            ORDER BY Foo.id desc
         ";
         test(actual, expected);
 
-        let actual = table("Bar")
+        // join constraint node -> order by node -> build
+        let actual = table("Foo")
             .select()
-            .group_by("name")
-            .order_by(vec!["id desc"])
-            .project("name, id")
+            .join("Bar")
+            .on("Foo.id = Bar.id")
+            .order_by("Foo.id desc")
             .build();
         let expected = "
-            SELECT name, id FROM Bar 
-            GROUP BY name
-            ORDER BY id DESC
+            SELECT * FROM Foo
+            JOIN Bar ON Foo.id = Bar.id
+            ORDER BY Foo.id desc
         ";
         test(actual, expected);
+
+        // hash join node -> order by node -> build
+        let actual = table("Player")
+            .select()
+            .join("PlayerItem")
+            .hash_executor("PlayerItem.user_id", "Player.id")
+            .order_by("Player.score DESC")
+            .build();
+        let expected = {
+            let join = Join {
+                relation: TableFactor::Table {
+                    name: "PlayerItem".to_owned(),
+                    alias: None,
+                    index: None,
+                },
+                join_operator: JoinOperator::Inner(JoinConstraint::None),
+                join_executor: JoinExecutor::Hash {
+                    key_expr: col("PlayerItem.user_id").try_into().unwrap(),
+                    value_expr: col("Player.id").try_into().unwrap(),
+                    where_clause: None,
+                },
+            };
+            let select = Select {
+                projection: SelectItemList::from("*").try_into().unwrap(),
+                from: TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: "Player".to_owned(),
+                        alias: None,
+                        index: None,
+                    },
+                    joins: vec![join],
+                },
+                selection: None,
+                group_by: Vec::new(),
+                having: None,
+            };
+
+            Ok(Statement::Query(Query {
+                body: SetExpr::Select(Box::new(select)),
+                order_by: OrderByExprList::from("Player.score DESC")
+                    .try_into()
+                    .unwrap(),
+                limit: None,
+                offset: None,
+            }))
+        };
+        assert_eq!(actual, expected);
     }
 }

@@ -14,22 +14,33 @@ pub struct TableNode {
 }
 
 impl TableNode {
-    pub fn select(self) -> SelectNode {
-        SelectNode::new(self.table_name)
+    pub fn alias_as(self, table_alias: &str) -> TableAliasNode {
+        TableAliasNode {
+            table_node: self,
+            table_alias: table_alias.to_owned(),
+        }
     }
 
-    pub fn delete(self) -> DeleteNode {
+    pub fn select(self) -> SelectNode {
+        SelectNode::new(self.table_name, None)
+    }
+
+    pub fn delete(self) -> DeleteNode<'static> {
         DeleteNode::new(self.table_name)
     }
 
     #[cfg(feature = "index")]
     pub fn drop_index(self, name: &str) -> DropIndexNode {
-        DropIndexNode::new(self.table_name, name.to_string())
+        DropIndexNode::new(self.table_name, name.to_owned())
     }
 
     #[cfg(feature = "index")]
-    pub fn create_index<T: Into<OrderByExprNode>>(self, name: &str, column: T) -> CreateIndexNode {
-        CreateIndexNode::new(self.table_name, name.to_string(), column.into())
+    pub fn create_index<'a, T: Into<OrderByExprNode<'a>>>(
+        self,
+        name: &str,
+        column: T,
+    ) -> CreateIndexNode<'a> {
+        CreateIndexNode::new(self.table_name, name.to_owned(), column.into())
     }
 
     pub fn show_columns(self) -> ShowColumnsNode {
@@ -57,11 +68,23 @@ impl TableNode {
         DropTableNode::new(self.table_name, true)
     }
 
-    pub fn update(self) -> UpdateNode {
+    pub fn update(self) -> UpdateNode<'static> {
         UpdateNode::new(self.table_name)
     }
 
     pub fn insert(self) -> InsertNode {
         InsertNode::new(self.table_name)
+    }
+}
+
+#[derive(Clone)]
+pub struct TableAliasNode {
+    pub table_node: TableNode,
+    pub table_alias: String,
+}
+
+impl TableAliasNode {
+    pub fn select(self) -> SelectNode {
+        SelectNode::new(self.table_node.table_name, Some(self.table_alias))
     }
 }

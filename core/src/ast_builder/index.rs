@@ -1,31 +1,33 @@
 #![cfg(feature = "index")]
 
-use crate::{
-    ast::{ObjectName, Statement},
-    result::Result,
+use {
+    super::Build,
+    crate::{ast::Statement, result::Result},
 };
 
 use super::OrderByExprNode;
 
 #[derive(Clone)]
-pub struct CreateIndexNode {
+pub struct CreateIndexNode<'a> {
     name: String,
     table_name: String,
-    column: OrderByExprNode,
+    column: OrderByExprNode<'a>,
 }
 
-impl CreateIndexNode {
-    pub fn new(table_name: String, name: String, column: OrderByExprNode) -> Self {
+impl<'a> CreateIndexNode<'a> {
+    pub fn new(table_name: String, name: String, column: OrderByExprNode<'a>) -> Self {
         Self {
             table_name,
             name,
             column,
         }
     }
+}
 
-    pub fn build(self) -> Result<Statement> {
-        let table_name = ObjectName(vec![self.table_name]);
-        let name = ObjectName(vec![self.name]);
+impl<'a> Build for CreateIndexNode<'a> {
+    fn build(self) -> Result<Statement> {
+        let table_name = self.table_name;
+        let name = self.name;
         let column = self.column.try_into()?;
 
         Ok(Statement::CreateIndex {
@@ -46,10 +48,12 @@ impl DropIndexNode {
     pub fn new(table_name: String, name: String) -> Self {
         Self { table_name, name }
     }
+}
 
-    pub fn build(self) -> Result<Statement> {
-        let table_name = ObjectName(vec![self.table_name]);
-        let name = ObjectName(vec![self.name]);
+impl Build for DropIndexNode {
+    fn build(self) -> Result<Statement> {
+        let table_name = self.table_name;
+        let name = self.name;
 
         Ok(Statement::DropIndex { name, table_name })
     }
@@ -57,7 +61,7 @@ impl DropIndexNode {
 
 #[cfg(all(test, feature = "index"))]
 mod tests {
-    use crate::ast_builder::{table, test};
+    use crate::ast_builder::{table, test, Build};
 
     #[test]
     fn create_index() {

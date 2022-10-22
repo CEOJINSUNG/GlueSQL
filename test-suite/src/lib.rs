@@ -1,12 +1,17 @@
+#![deny(clippy::str_to_string)]
+
 pub mod aggregate;
 pub mod alter;
 pub mod arithmetic;
+pub mod ast_builder;
 pub mod basic;
 pub mod blend;
 pub mod case;
 pub mod concat;
 pub mod data_type;
 pub mod default;
+pub mod dictionary;
+pub mod dictionary_index;
 pub mod filter;
 pub mod function;
 pub mod index;
@@ -15,7 +20,6 @@ pub mod insert;
 pub mod join;
 pub mod like_ilike;
 pub mod limit;
-pub mod metadata;
 pub mod migrate;
 pub mod nested_select;
 pub mod nullable;
@@ -23,7 +27,7 @@ pub mod order_by;
 pub mod ordering;
 pub mod primary_key;
 pub mod series;
-pub mod showcolumns;
+pub mod show_columns;
 pub mod synthesize;
 pub mod transaction;
 pub mod type_match;
@@ -116,6 +120,9 @@ macro_rules! generate_store_tests {
         glue!(function_now, function::now::now);
         glue!(function_sign, function::sign::sign);
         glue!(function_to_date, function::to_date::to_date);
+        glue!(function_ascii, function::ascii::ascii);
+        glue!(function_chr, function::chr::chr);
+        glue!(function_position, function::position::position);
         glue!(join, join::join);
         glue!(join_blend, join::blend);
         glue!(migrate, migrate::migrate);
@@ -128,13 +135,13 @@ macro_rules! generate_store_tests {
         glue!(ordering, ordering::ordering);
         glue!(order_by, order_by::order_by);
         glue!(sql_types, data_type::sql_types::sql_types);
-        glue!(showcolumns, showcolumns::showcolumns);
+        glue!(show_columns, show_columns::show_columns);
         glue!(int8, data_type::int8::int8);
-        glue!(uint8, data_type::int8::int8);
         glue!(int16, data_type::int16::int16);
         glue!(int32, data_type::int32::int32);
         glue!(int64, data_type::int64::int64);
         glue!(int128, data_type::int128::int128);
+        glue!(uint8, data_type::uint8::uint8);
         glue!(date, data_type::date::date);
         glue!(timestamp, data_type::timestamp::timestamp);
         glue!(time, data_type::time::time);
@@ -160,6 +167,14 @@ macro_rules! generate_store_tests {
             function::generate_uuid::generate_uuid
         );
         glue!(type_match, type_match::type_match);
+        glue!(dictionary, dictionary::dictionary);
+
+        // ast-builder
+        glue!(ast_builder_basic, ast_builder::basic::basic);
+        glue!(ast_builder_select, ast_builder::select::select);
+        glue!(ast_builder_insert, ast_builder::insert::insert);
+        glue!(ast_builder_update, ast_builder::update::update);
+        glue!(ast_builder_delete, ast_builder::delete::delete);
     };
 }
 
@@ -197,6 +212,7 @@ macro_rules! generate_index_tests {
         glue!(index_order_by, index::order_by);
         glue!(index_order_by_multi, index::order_by_multi);
         glue!(showindexes, index::showindexes);
+        glue!(dictionary_index, dictionary_index::ditionary_index);
     };
 }
 
@@ -215,20 +231,6 @@ macro_rules! generate_transaction_tests {
             transaction_create_drop_table,
             transaction::create_drop_table
         );
-    };
-}
-
-#[cfg(feature = "metadata")]
-#[macro_export]
-macro_rules! generate_metadata_tests {
-    ($test: meta, $storage: ident) => {
-        macro_rules! glue {
-            ($title: ident, $func: path) => {
-                declare_test_fn!($test, $storage, $title, $func);
-            };
-        }
-
-        glue!(metadata, metadata::metadata);
     };
 }
 
@@ -291,9 +293,9 @@ macro_rules! generate_transaction_index_tests {
     };
 }
 
-#[cfg(all(feature = "transaction", feature = "metadata"))]
+#[cfg(all(feature = "transaction"))]
 #[macro_export]
-macro_rules! generate_transaction_metadata_tests {
+macro_rules! generate_transaction_dictionary_tests {
     ($test: meta, $storage: ident) => {
         macro_rules! glue {
             ($title: ident, $func: path) => {
@@ -301,6 +303,6 @@ macro_rules! generate_transaction_metadata_tests {
             };
         }
 
-        glue!(transaction_metadata, transaction::metadata);
+        glue!(transaction_dictionary, transaction::dictionary);
     };
 }

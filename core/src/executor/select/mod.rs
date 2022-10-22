@@ -17,7 +17,7 @@ use {
     },
     crate::{
         ast::{Expr, OrderByExpr, Query, Select, SelectItem, SetExpr, TableWithJoins, Values},
-        data::{get_alias, get_name, Row, RowError},
+        data::{get_alias, Row, RowError},
         prelude::{DataType, Value},
         result::{Error, Result},
         store::GStore,
@@ -82,9 +82,7 @@ pub fn get_labels<'a>(
                 let labels = labels.map(Ok);
                 Labeled::Wildcard(Wildcard::WithoutJoin(labels))
             }
-            SelectItem::QualifiedWildcard(target) => {
-                let target_table_alias = try_into!(get_name(target));
-
+            SelectItem::QualifiedWildcard(target_table_alias) => {
                 if table_alias == target_table_alias {
                     return Labeled::QualifiedWildcard(to_labels(columns).map(Ok));
                 }
@@ -95,7 +93,7 @@ pub fn get_labels<'a>(
                         .find(|(table_alias, _)| table_alias == &target_table_alias)
                         .map(|(_, columns)| columns)
                         .ok_or_else(|| {
-                            SelectError::TableAliasNotFound(target_table_alias.to_string()).into()
+                            SelectError::TableAliasNotFound(target_table_alias.to_owned()).into()
                         });
                     let columns = try_into!(columns);
                     let labels = to_labels(columns);
@@ -224,7 +222,7 @@ pub async fn select_with_labels<'a>(
             .map(move |row| {
                 let row = Some(row?);
                 let columns = Rc::clone(&columns);
-                let alias = get_alias(relation)?;
+                let alias = get_alias(relation);
                 Ok(BlendContext::new(alias, columns, Single(row), None))
             })
     };
@@ -233,7 +231,7 @@ pub async fn select_with_labels<'a>(
     let labels = if with_labels {
         get_labels(
             projection,
-            get_alias(relation)?,
+            get_alias(relation),
             &columns,
             Some(&join_columns),
         )?
@@ -304,7 +302,7 @@ pub async fn select_with_labels<'a>(
 
     let labels = Rc::new(labels);
     let rows = sort
-        .apply(rows, Rc::clone(&labels), get_alias(relation)?)
+        .apply(rows, Rc::clone(&labels), get_alias(relation))
         .await?;
 
     let rows = limit.apply(rows);

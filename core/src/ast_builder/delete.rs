@@ -1,18 +1,18 @@
 use {
-    super::ExprNode,
+    super::{Build, ExprNode},
     crate::{
-        ast::{Expr, ObjectName, Statement},
+        ast::{Expr, Statement},
         result::Result,
     },
 };
 
 #[derive(Clone)]
-pub struct DeleteNode {
+pub struct DeleteNode<'a> {
     table_name: String,
-    filter_expr: Option<ExprNode>,
+    filter_expr: Option<ExprNode<'a>>,
 }
 
-impl DeleteNode {
+impl<'a> DeleteNode<'a> {
     pub fn new(table_name: String) -> Self {
         Self {
             table_name,
@@ -20,14 +20,16 @@ impl DeleteNode {
         }
     }
 
-    pub fn filter<T: Into<ExprNode>>(mut self, expr: T) -> Self {
+    pub fn filter<T: Into<ExprNode<'a>>>(mut self, expr: T) -> Self {
         self.filter_expr = Some(expr.into());
 
         self
     }
+}
 
-    pub fn build(self) -> Result<Statement> {
-        let table_name = ObjectName(vec![self.table_name]);
+impl<'a> Build for DeleteNode<'a> {
+    fn build(self) -> Result<Statement> {
+        let table_name = self.table_name;
         let selection = self.filter_expr.map(Expr::try_from).transpose()?;
 
         Ok(Statement::Delete {
@@ -41,7 +43,7 @@ impl DeleteNode {
 mod tests {
     use crate::{
         ast::Expr,
-        ast_builder::{col, table, test},
+        ast_builder::{col, table, test, Build},
     };
 
     #[test]

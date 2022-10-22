@@ -5,10 +5,9 @@ use {
     },
     crate::{
         ast::{
-            AstLiteral, Expr, Join, JoinConstraint, JoinExecutor, JoinOperator, ObjectName, Query,
+            AstLiteral, Dictionary, Expr, Join, JoinConstraint, JoinExecutor, JoinOperator, Query,
             Select, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Values,
         },
-        data::get_name,
         result::Result,
     },
     sqlparser::ast::{
@@ -70,6 +69,7 @@ fn translate_select(sql_select: &SqlSelect) -> Result<Select> {
         selection,
         group_by,
         having,
+        distinct,
         ..
     } = sql_select;
 
@@ -77,12 +77,18 @@ fn translate_select(sql_select: &SqlSelect) -> Result<Select> {
         return Err(TranslateError::TooManyTables.into());
     }
 
+    if *distinct {
+        return Err(TranslateError::SelectDistinctNotSupported.into());
+    }
+
     let from = match from.get(0) {
         Some(sql_table_with_joins) => translate_table_with_joins(sql_table_with_joins)?,
         None => TableWithJoins {
             relation: TableFactor::Series {
-                name: ObjectName(vec!["Series".into()]),
-                alias: None,
+                alias: TableAlias {
+                    name: "Seires".to_owned(),
+                    columns: Vec::new(),
+                },
                 size: Expr::Literal(AstLiteral::Number(1.into())),
             },
             joins: vec![],
@@ -124,7 +130,7 @@ pub fn translate_select_item(sql_select_item: &SqlSelectItem) -> Result<SelectIt
             })
         }
         SqlSelectItem::QualifiedWildcard(object_name) => Ok(SelectItem::QualifiedWildcard(
-            translate_object_name(object_name),
+            translate_object_name(object_name)?,
         )),
         SqlSelectItem::Wildcard => Ok(SelectItem::Wildcard),
     }
@@ -172,21 +178,42 @@ fn translate_table_factor(sql_table_factor: &SqlTableFactor) -> Result<TableFact
     match sql_table_factor {
         SqlTableFactor::Table {
             name, alias, args, ..
-        } if get_name(&translate_object_name(name))?.to_uppercase() == "SERIES"
-            && args.is_some() =>
-        {
-            Ok(TableFactor::Series {
-                name: translate_object_name(name),
-                alias: translate_table_alias(alias),
-                size: translate_table_args(args)?,
-            })
-        }
-        SqlTableFactor::Table { name, alias, .. } => {
-            Ok(TableFactor::Table {
-                name: translate_object_name(name),
-                alias: translate_table_alias(alias),
-                index: None, // query execution plan
-            })
+        } => {
+            let object_name = translate_object_name(name)?.to_uppercase();
+            let alias = translate_table_alias(alias);
+            let alias_or_name = match &alias {
+                Some(alias) => alias.to_owned(),
+                None => TableAlias {
+                    name: object_name.to_owned(),
+                    columns: Vec::new(),
+                },
+            };
+
+            match object_name.as_str() {
+                "SERIES" if args.is_some() => Ok(TableFactor::Series {
+                    alias: alias_or_name,
+                    size: translate_table_args(args)?,
+                }),
+                "GLUE_TABLES" => Ok(TableFactor::Dictionary {
+                    dict: Dictionary::GlueTables,
+                    alias: alias_or_name,
+                }),
+                "GLUE_INDEXES" => Ok(TableFactor::Dictionary {
+                    dict: Dictionary::GlueIndexes,
+                    alias: alias_or_name,
+                }),
+                "GLUE_TABLE_COLUMNS" => Ok(TableFactor::Dictionary {
+                    dict: Dictionary::GlueTableColumns,
+                    alias: alias_or_name,
+                }),
+                _ => {
+                    Ok(TableFactor::Table {
+                        name: translate_object_name(name)?,
+                        alias,
+                        index: None, // query execution plan
+                    })
+                }
+            }
         }
         SqlTableFactor::Derived {
             subquery, alias, ..

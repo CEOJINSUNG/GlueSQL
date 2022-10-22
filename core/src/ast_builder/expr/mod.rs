@@ -1,4 +1,5 @@
 mod binary_op;
+mod case;
 mod exists;
 mod is_null;
 mod like;
@@ -7,21 +8,17 @@ mod unary_op;
 
 pub mod aggregate;
 pub mod between;
-pub mod cast;
-pub mod extract;
 pub mod function;
 pub mod in_list;
 
+pub use case::case;
 pub use exists::{exists, not_exists};
 pub use nested::nested;
+pub use unary_op::{factorial, minus, not, plus};
 
 use {
-    super::DataTypeNode,
     crate::{
-        ast::{
-            Aggregate, AstLiteral, BinaryOperator, DateTimeField, Expr, Function, Query,
-            UnaryOperator,
-        },
+        ast::{Aggregate, AstLiteral, BinaryOperator, Expr, Function, Query, UnaryOperator},
         ast_builder::QueryNode,
         parse_sql::{parse_comma_separated_exprs, parse_expr, parse_query},
         prelude::DataType,
@@ -32,11 +29,12 @@ use {
     bigdecimal::BigDecimal,
     function::FunctionNode,
     in_list::InListNode,
+    std::borrow::Cow,
 };
 
 #[derive(Clone)]
-pub enum ExprNode {
-    Expr(Expr),
+pub enum ExprNode<'a> {
+    Expr(Cow<'a, Expr>),
     SqlExpr(String),
     Identifier(String),
     CompoundIdentifier {
@@ -44,60 +42,58 @@ pub enum ExprNode {
         ident: String,
     },
     Between {
-        expr: Box<ExprNode>,
+        expr: Box<ExprNode<'a>>,
         negated: bool,
-        low: Box<ExprNode>,
-        high: Box<ExprNode>,
+        low: Box<ExprNode<'a>>,
+        high: Box<ExprNode<'a>>,
     },
     Like {
-        expr: Box<ExprNode>,
+        expr: Box<ExprNode<'a>>,
         negated: bool,
-        pattern: Box<ExprNode>,
+        pattern: Box<ExprNode<'a>>,
     },
     ILike {
-        expr: Box<ExprNode>,
+        expr: Box<ExprNode<'a>>,
         negated: bool,
-        pattern: Box<ExprNode>,
+        pattern: Box<ExprNode<'a>>,
     },
     BinaryOp {
-        left: Box<ExprNode>,
+        left: Box<ExprNode<'a>>,
         op: BinaryOperator,
-        right: Box<ExprNode>,
+        right: Box<ExprNode<'a>>,
     },
     UnaryOp {
         op: UnaryOperator,
-        expr: Box<ExprNode>,
+        expr: Box<ExprNode<'a>>,
     },
-    Extract {
-        field: DateTimeField,
-        expr: Box<ExprNode>,
-    },
-    IsNull(Box<ExprNode>),
-    IsNotNull(Box<ExprNode>),
+    IsNull(Box<ExprNode<'a>>),
+    IsNotNull(Box<ExprNode<'a>>),
     InList {
-        expr: Box<ExprNode>,
-        list: Box<InListNode>,
+        expr: Box<ExprNode<'a>>,
+        list: Box<InListNode<'a>>,
         negated: bool,
     },
-    Nested(Box<ExprNode>),
-    Function(Box<FunctionNode>),
-    Aggregate(Box<AggregateNode>),
-    Cast {
-        expr: Box<ExprNode>,
-        data_type: DataTypeNode,
-    },
+    Nested(Box<ExprNode<'a>>),
+    Function(Box<FunctionNode<'a>>),
+    Aggregate(Box<AggregateNode<'a>>),
     Exists {
-        subquery: Box<QueryNode>,
+        subquery: Box<QueryNode<'a>>,
         negated: bool,
+    },
+    Subquery(Box<QueryNode<'a>>),
+    Case {
+        operand: Option<Box<ExprNode<'a>>>,
+        when_then: Vec<(ExprNode<'a>, ExprNode<'a>)>,
+        else_result: Option<Box<ExprNode<'a>>>,
     },
 }
 
-impl TryFrom<ExprNode> for Expr {
+impl<'a> TryFrom<ExprNode<'a>> for Expr {
     type Error = Error;
 
-    fn try_from(expr_node: ExprNode) -> Result<Self> {
+    fn try_from(expr_node: ExprNode<'a>) -> Result<Self> {
         match expr_node {
-            ExprNode::Expr(expr) => Ok(expr),
+            ExprNode::Expr(expr) => Ok(expr.into_owned()),
             ExprNode::SqlExpr(expr) => {
                 let expr = parse_expr(expr)?;
 
@@ -161,15 +157,6 @@ impl TryFrom<ExprNode> for Expr {
             ExprNode::UnaryOp { op, expr } => {
                 let expr = Expr::try_from(*expr).map(Box::new)?;
                 Ok(Expr::UnaryOp { op, expr })
-            }
-            ExprNode::Extract { field, expr } => {
-                let expr = Expr::try_from(*expr).map(Box::new)?;
-                Ok(Expr::Extract { field, expr })
-            }
-            ExprNode::Cast { expr, data_type } => {
-                let expr = Expr::try_from(*expr).map(Box::new)?;
-                let data_type = data_type.try_into()?;
-                Ok(Expr::Cast { expr, data_type })
             }
             ExprNode::IsNull(expr) => Expr::try_from(*expr).map(Box::new).map(Expr::IsNull),
             ExprNode::IsNotNull(expr) => Expr::try_from(*expr).map(Box::new).map(Expr::IsNotNull),
@@ -235,33 +222,78 @@ impl TryFrom<ExprNode> for Expr {
             ExprNode::Exists { subquery, negated } => Query::try_from(*subquery)
                 .map(Box::new)
                 .map(|subquery| Expr::Exists { subquery, negated }),
+            ExprNode::Subquery(subquery) => {
+                Query::try_from(*subquery).map(Box::new).map(Expr::Subquery)
+            }
+            ExprNode::Case {
+                operand,
+                when_then,
+                else_result,
+            } => {
+                let operand = operand
+                    .map(|expr| Expr::try_from(*expr))
+                    .transpose()?
+                    .map(Box::new);
+                let when_then = when_then
+                    .into_iter()
+                    .map(|(when, then)| {
+                        let when = Expr::try_from(when)?;
+                        let then = Expr::try_from(then)?;
+                        Ok((when, then))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let else_result = else_result
+                    .map(|expr| Expr::try_from(*expr))
+                    .transpose()?
+                    .map(Box::new);
+                Ok(Expr::Case {
+                    operand,
+                    when_then,
+                    else_result,
+                })
+            }
         }
     }
 }
 
-impl From<&str> for ExprNode {
+impl<'a> From<&str> for ExprNode<'a> {
     fn from(expr: &str) -> Self {
         ExprNode::SqlExpr(expr.to_owned())
     }
 }
 
-impl From<i64> for ExprNode {
+impl<'a> From<i64> for ExprNode<'a> {
     fn from(n: i64) -> Self {
-        ExprNode::Expr(Expr::Literal(AstLiteral::Number(BigDecimal::from(n))))
+        ExprNode::Expr(Cow::Owned(Expr::Literal(AstLiteral::Number(
+            BigDecimal::from(n),
+        ))))
     }
 }
 
-impl From<Expr> for ExprNode {
+impl<'a> From<bool> for ExprNode<'a> {
+    fn from(b: bool) -> Self {
+        ExprNode::Expr(Cow::Owned(Expr::Literal(AstLiteral::Boolean(b))))
+    }
+}
+
+impl<'a> From<QueryNode<'a>> for ExprNode<'a> {
+    fn from(node: QueryNode<'a>) -> Self {
+        ExprNode::Subquery(Box::new(node))
+    }
+}
+
+impl<'a> From<Expr> for ExprNode<'a> {
     fn from(expr: Expr) -> Self {
-        ExprNode::Expr(expr)
+        ExprNode::Expr(Cow::Owned(expr))
     }
 }
 
-pub fn expr(value: &str) -> ExprNode {
+pub fn expr<'a>(value: &str) -> ExprNode<'a> {
     ExprNode::from(value)
 }
 
-pub fn col(value: &str) -> ExprNode {
+pub fn col<'a>(value: &str) -> ExprNode<'a> {
     let idents = value.split('.').collect::<Vec<_>>();
 
     match idents.as_slice() {
@@ -273,24 +305,112 @@ pub fn col(value: &str) -> ExprNode {
     }
 }
 
-pub fn num(value: i64) -> ExprNode {
+pub fn num<'a>(value: i64) -> ExprNode<'a> {
     ExprNode::from(value)
 }
 
-pub fn text(value: &str) -> ExprNode {
-    ExprNode::Expr(Expr::Literal(AstLiteral::QuotedString(value.to_owned())))
+pub fn text<'a>(value: &str) -> ExprNode<'a> {
+    ExprNode::Expr(Cow::Owned(Expr::Literal(AstLiteral::QuotedString(
+        value.to_owned(),
+    ))))
 }
 
-pub fn date(date: &str) -> ExprNode {
-    ExprNode::Expr(Expr::TypedString {
-        data_type: (DataType::Date),
-        value: (date.to_string()),
-    })
+pub fn date<'a>(date: &str) -> ExprNode<'a> {
+    ExprNode::Expr(Cow::Owned(Expr::TypedString {
+        data_type: DataType::Date,
+        value: date.to_owned(),
+    }))
 }
 
-pub fn timestamp(timestamp: &str) -> ExprNode {
-    ExprNode::Expr(Expr::TypedString {
-        data_type: (DataType::Timestamp),
-        value: (timestamp.to_string()),
-    })
+pub fn timestamp<'a>(timestamp: &str) -> ExprNode<'a> {
+    ExprNode::Expr(Cow::Owned(Expr::TypedString {
+        data_type: DataType::Timestamp,
+        value: timestamp.to_owned(),
+    }))
+}
+
+pub fn time<'a>(time: &str) -> ExprNode<'a> {
+    ExprNode::Expr(Cow::Owned(Expr::TypedString {
+        data_type: DataType::Time,
+        value: time.to_owned(),
+    }))
+}
+
+pub fn subquery<'a, T: Into<QueryNode<'a>>>(query_node: T) -> ExprNode<'a> {
+    ExprNode::Subquery(Box::new(query_node.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::ExprNode,
+        crate::{
+            ast::Expr,
+            ast_builder::{
+                col, date, expr, num, subquery, table, test_expr, text, time, timestamp, QueryNode,
+            },
+        },
+    };
+
+    #[test]
+    fn into_expr_node() {
+        let actual: ExprNode = "id IS NOT NULL".into();
+        let expected = "id IS NOT NULL";
+        test_expr(actual, expected);
+
+        let actual: ExprNode = 1024.into();
+        let expected = "1024";
+        test_expr(actual, expected);
+
+        let actual: ExprNode = true.into();
+        let expected = "True";
+        test_expr(actual, expected);
+
+        let actual: ExprNode = QueryNode::from(table("Foo").select().project("id")).into();
+        let expected = "(SELECT id FROM Foo)";
+        test_expr(actual, expected);
+
+        let actual: ExprNode = Expr::Identifier("id".to_owned()).into();
+        let expected = "id";
+        test_expr(actual, expected);
+    }
+
+    #[test]
+    fn syntactic_sugar() {
+        let actual = expr("col1 > 10");
+        let expected = "col1 > 10";
+        test_expr(actual, expected);
+
+        let actual = col("id");
+        let expected = "id";
+        test_expr(actual, expected);
+
+        let actual = col("Foo.id");
+        let expected = "Foo.id";
+        test_expr(actual, expected);
+
+        let actual = num(2048);
+        let expected = "2048";
+        test_expr(actual, expected);
+
+        let actual = text("hello world");
+        let expected = "'hello world'";
+        test_expr(actual, expected);
+
+        let actual = date("2022-10-11");
+        let expected = "DATE '2022-10-11'";
+        test_expr(actual, expected);
+
+        let actual = timestamp("2022-10-11 13:34:49");
+        let expected = "TIMESTAMP '2022-10-11 13:34:49'";
+        test_expr(actual, expected);
+
+        let actual = time("15:00:07");
+        let expected = "TIME '15:00:07'";
+        test_expr(actual, expected);
+
+        let actual = subquery(table("Foo").select().filter("id IS NOT NULL"));
+        let expected = "(SELECT * FROM Foo WHERE id IS NOT NULL)";
+        test_expr(actual, expected);
+    }
 }
